@@ -1,6 +1,7 @@
 import numpy as np
 
 class SemanticHopfieldNetwork:
+    # DO NOT USE
     def __init__(self, pmi_df, threshold=None):
         # 1. Setup vocabulary and dictionaries (same as before)
         unique_words = set(pmi_df['word_x']).union(set(pmi_df['word_y']))
@@ -150,9 +151,11 @@ class ZScoredHopfieldNetwork:
 # --- Example Usage ---
 if __name__ == "__main__":
     import pandas as pd
+    # load the PMI DataFrame
     pmi_df = pd.read_csv('lemmatized_pmi_results.csv', sep='\t', encoding='utf-8')
     pmi_df = pmi_df.astype({'word_x': str, 'word_y': str, 'f_xy': int, 'f_x': int, 'f_y': int, 'pmi': float})
     print(f"Mean PMI: {pmi_df['pmi'].mean():.4f}, Std Dev PMI: {pmi_df['pmi'].std():.4f}")
+    # 1. Initialize the ZScoredHopfieldNetwork
     hopfield_net = ZScoredHopfieldNetwork(pmi_df)
     # 2. Provide a "stimulus" word to the network
     seed_words = ['american', 'president']  # Example input words

@@ -4,59 +4,53 @@ import spacy
 from collections import Counter
 from itertools import combinations
 
-# Ensure you have the model installed: python -m spacy download en_core_web_sm
-nlp = spacy.load("en_core_web_sm")
+# 1. Disable the heavy, unnecessary components ('parser' and 'ner')
+# Keep 'tok2vec', 'tagger', and 'attribute_ruler' as the lemmatizer depends on them
+nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
 
-def generate_lemmatized_pmi(sentences_df, min_co_occurrence=3):
-    """
-    Tokenizes and lemmatizes sentences, counts frequencies, 
-    and calculates PMI for word pairs.
-    """
+def generate_lemmatized_pmi_fast(sentences_df, min_co_occurrence=3):
     word_counts = Counter()
     co_occurrence_counts = Counter()
     total_tokens = 0
     
-    # Process each sentence
-    for text in sentences_df['sentence_text'].dropna():
-        # Let spaCy parse the sentence
-        doc = nlp(text)
+    # Drop empty rows and convert to a list of strings
+    texts = sentences_df['sentence_text'].dropna().tolist()
+    
+    print(f"Processing {len(texts)} sentences...")
+    
+    # 2 & 3. Use nlp.pipe() for batching and multiprocessing
+    # batch_size=1000 processes 1000 texts at once
+    # n_process=-1 tells spaCy to use all available CPU cores
+    for doc in nlp.pipe(texts, batch_size=1000, n_process=-1):
         
-        # Extract valid lemmas: lowercased, ignoring punctuation and whitespaces
         valid_lemmas = [
             token.lemma_.lower() for token in doc 
-            if not token.is_punct and not token.is_space
+            if not token.is_punct and not token.is_space and not token.is_stop
         ]
         
-        # 1. Update total token count and individual word frequencies (f_x)
         total_tokens += len(valid_lemmas)
         word_counts.update(valid_lemmas)
         
-        # 2. Update sentence co-occurrences (f_xy)
-        # Convert to a set to avoid counting (word, word) combinations 
-        # or duplicate pairs within the exact same sentence
         unique_lemmas = sorted(list(set(valid_lemmas)))
-        
-        # Generate all unique pairs in this sentence and count them
         co_occurrence_counts.update(combinations(unique_lemmas, 2))
 
-    # Convert co-occurrences into a DataFrame
+    print("Calculations complete. Building DataFrame...")
+
+    # (The rest of the DataFrame construction and PMI math remains exactly the same)
     co_s_records = [
         {'word_x': pair[0], 'word_y': pair[1], 'f_xy': count}
         for pair, count in co_occurrence_counts.items()
-        if count >= min_co_occurrence  # Filter out rare pairs to reduce noise
+        if count >= min_co_occurrence 
     ]
     pmi_df = pd.DataFrame(co_s_records)
     
-    # Map individual word frequencies to the DataFrame
     words_dict = dict(word_counts)
     pmi_df['f_x'] = pmi_df['word_x'].map(words_dict)
     pmi_df['f_y'] = pmi_df['word_y'].map(words_dict)
     
-    # Calculate PMI: log2( (f(x,y) * N) / (f(x) * f(y)) )
     N = total_tokens
     pmi_df['pmi'] = np.log2((pmi_df['f_xy'] * N) / (pmi_df['f_x'] * pmi_df['f_y']))
     
-    # Sort by highest PMI score
     pmi_df = pmi_df.sort_values(by='pmi', ascending=False).reset_index(drop=True)
     
     return pmi_df, words_dict
@@ -65,10 +59,10 @@ def generate_lemmatized_pmi(sentences_df, min_co_occurrence=3):
 if __name__ == "__main__":
     # Load the sentences DataFrame
     from helper import load_sentences
-    sentences_df = load_sentences('eng-simple_wikipedia_2021_10K/eng-simple_wikipedia_2021_10K-sentences.txt')
+    sentences_df = load_sentences('eng-simple_wikipedia_2021_300K/eng-simple_wikipedia_2021_300K-sentences.txt')
     
     # Generate lemmatized PMI
-    pmi_results, word_frequencies = generate_lemmatized_pmi(sentences_df, min_co_occurrence=3)
+    pmi_results, word_frequencies = generate_lemmatized_pmi_fast(sentences_df, min_co_occurrence=3)
     
     # Display the top 10 word pairs with the highest PMI
     print("Top 10 word pairs with the highest PMI:")

@@ -1,0 +1,6 @@
+*.tar.gz
+*.png
+*.txt
+*.sql
+.vscode/
+__pycache__/
