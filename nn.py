@@ -119,7 +119,7 @@ class ZScoredHopfieldNetwork:
         # Vectorized Harmony calculation: 0.5 * (S^T * W * S)
         return 0.5 * np.dot(state, np.dot(self.W, state))
 
-    def retrieve(self, input_words, max_steps=10, output_words=True, track_harmony=True):
+    def retrieve(self, input_words, max_steps=10, output_words=True, output_harmony=True, track_harmony=True):
         """
         Runs the standard bipolar update rule with clamped inputs.
         Optionally tracks and prints the harmony at every stage.
@@ -165,46 +165,49 @@ class ZScoredHopfieldNetwork:
         retrieved_words = [
             self.idx_to_word[i] for i in range(self.N) if state[i] == 1.0
         ]
-        
-        if output_words:
+
+        if output_harmony:
+            return self.calculate_harmony(state)
+        elif output_words:
             return retrieved_words
         else:
             return state
 
-    def incremental_retrieve(self, input_words, max_steps_per_word=10, output_harmony=True, output_words=False):
+    def incremental_retrieve(self, input_words, max_steps_per_word=10, output_harmony=True, output_words=True):
         """
-        Incrementally clamps words from a sequence one by one.
-        Allows the network to converge after each new word is introduced.
+        Incrementally clamps words from a sequence one by one, tracking the 
+        corrected bipolar Delta Harmony (ΔH = 2 * h_k) when a node flips.
         """
-        trajectory = [] # harmony after each new word is added
-        harmony_trajectory = [] # track harmony at each stage for debugging
-        # 1. Initialize an empty bipolar state and an empty clamped set
+        trajectory = []
+        # Initialize an empty bipolar state and an empty clamped set
         state = np.full(self.N, -1.0)
         clamped_set = set()
         
         for word in input_words:
             if word not in self.word_to_idx:
-                #print(f"Warning: '{word}' not in vocabulary. Skipping.")
+                print(f"Warning: '{word}' not in vocabulary. Skipping.")
                 trajectory.append({
                     'word': word,
                     'delta_harmony': 0.0,
-                    'total_harmony': harmony_trajectory[-1] if harmony_trajectory else 0.0
+                    'total_harmony': self.calculate_harmony(state),
+                    'active_nodes': np.sum(state == 1.0)
                 })
                 continue
                 
-            # 2. Clamp the new word
             idx = self.word_to_idx[word]
             clamped_set.add(idx)
             
-            # If the node isn't already 1.0, switch it on
+            # 1. Calculate the local field (h_k) BEFORE flipping the node
+            h_k = np.dot(self.W[idx], state)
+            
+            # 2. Apply the flip and calculate Delta Harmony
             if state[idx] != 1.0:
+                delta_h = 2 * h_k  # The corrected bipolar delta harmony
                 state[idx] = 1.0
-                #print(f"\n--- Clamped new word: '{word}' ---")
-                harmony_after_clamp = self.calculate_harmony(state)
-                delta_harmony = (harmony_after_clamp - harmony_trajectory[-1]) if harmony_trajectory else 0.0
+                print(f"\n--- Clamped new word: '{word}' | ΔH: {delta_h:.4f} ---")
             else:
-                #print(f"\n--- Clamped '{word}' (was already active) ---")
-                delta_harmony = 0.0
+                delta_h = 0.0
+                print(f"\n--- Clamped '{word}' (was already active) | ΔH: 0.0000 ---")
             
             # 3. Run the standard update loop until convergence for this stage
             for step in range(max_steps_per_word):
@@ -212,35 +215,34 @@ class ZScoredHopfieldNetwork:
                 indices = np.random.permutation(self.N)
                 
                 for i in indices:
-                    # Skip the progressively growing list of clamped inputs
                     if i in clamped_set:
                         continue
                         
-                    # Standard Hopfield activation
                     activation = np.dot(self.W[i], state)
                     
-                    # Bipolar thresholding strictly at 0
                     if activation > 0:
                         state[i] = 1.0
                     elif activation < 0:
                         state[i] = -1.0
                         
                 if np.array_equal(state, prev_state):
-                    #print(f"Network converged in {step + 1} iterations for '{word}'.")
+                    print(f"Network settled in {step + 1} iterations.")
                     break
             else:
-                print(f"Stopped after {max_steps_per_word} iterations (no strict convergence).")
+                print(f"Stopped after {max_steps_per_word} iterations.")
             
-            # Optional: Display the harmony at this stable point
-            harmony = self.calculate_harmony(state)
-            harmony_trajectory.append(harmony)
+            # 4. Display the total global harmony at this stable point
+            current_harmony = 0.5 * np.dot(state, np.dot(self.W, state))
+            active_count = np.sum(state == 1.0)
+            #print(f"Total Harmony: {current_harmony:.4f} | Active Nodes: {active_count}")
             trajectory.append({
                 'word': word,
-                'delta_harmony': delta_harmony,
-                'total_harmony': harmony
-                })
+                'delta_harmony': delta_h,
+                'total_harmony': current_harmony,
+                'active_nodes': active_count
+            })
             
-        # 4. Decode the final state after all words are sequentially added
+        # Decode the final state after all words are sequentially added
         retrieved_words = [
             self.idx_to_word[i] for i in range(self.N) if state[i] == 1.0
         ]
@@ -415,6 +417,15 @@ if __name__ == "__main__":
     trajectory = hopfield_net.incremental_retrieve(input_sequence, max_steps_per_word=10, output_harmony=True, output_words=False)    
     for step in trajectory:
         print(f"Word: {step['word']}, Delta Harmony: {step['delta_harmony']:.4f}, Total Harmony: {step['total_harmony']:.4f}")
+
+    # Control: just calculate the total harmony change by feeding the sequence as (a,) (a,b) (a,b,c) (a,b,c,d)
+    prev_harmony = 0.0
+    for i in range(1, len(input_sequence) + 1):
+        sub_sequence = input_sequence[:i]
+        total_h = hopfield_net.retrieve(sub_sequence, output_harmony=True, output_words=False, track_harmony=False)
+        delta_h = total_h - prev_harmony
+        prev_harmony = total_h
+        print(f"Sub-sequence: {sub_sequence}, Total Harmony: {total_h:.4f}, Delta Harmony: {delta_h:.4f}")
 
     # test the incremental harmony network
     incremental_net = IncrementalHarmonyNetwork(pmi_df)
