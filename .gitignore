@@ -4,3 +4,4 @@
 *.sql
 .vscode/
 __pycache__/
+word_segments/

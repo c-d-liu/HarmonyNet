@@ -1,10 +1,13 @@
 from nn import ZScoredHopfieldNetwork, IncrementalHarmonyNetwork
 import pandas as pd
 import spacy
+import os
 
-sentence_csv = 'C:\\Users\\cliu\\PodCastECoG\\transcript_parsed_aligned.csv'
-df = pd.read_csv(sentence_csv)
-sentences = df['new_text'].dropna().tolist()
+output_dir = "word_segments"
+
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+
 nlp = spacy.blank("en")
 nlp.add_pipe("lemmatizer", config={"mode": "lookup"}).initialize()
 
@@ -13,12 +16,15 @@ pmi_df = pd.read_csv('wordlists/lemmatized_pmi_results_10K_threshold_3_w_stopwor
 hopfield_traj = []
 pmi_traj = []
 
-for sentence in sentences[:10]:
-    words = sentence.split()
-    # lemmatize the words
-    words = [word.lower().strip(".,!?;:()[]{}\"'") for word in words]
-    words = [nlp(word)[0].lemma_ for word in words if word]  # filter out empty strings
-    print(f"\nProcessing sentence: {sentence}")
+sentence_dir = "C:\\Users\\cliu\\PodCastECoG\\words_segments"
+sentences = [f for f in os.listdir(sentence_dir) if f.endswith('.csv')]
+
+for sentence in sentences:
+    df = pd.read_csv(os.path.join(sentence_dir, sentence))
+    words = df['norm'].tolist()
+    words = [nlp(word)[0].lemma_.lower().strip('.,!?;:()[]{}"\'') for word in words]  # Lemmatize and lowercase
+    text = ' '.join(words)
+    print(f"\nProcessing sentence: {text}")
     
     # Initialize the ZScoredHopfieldNetwork
     hopfield_net = ZScoredHopfieldNetwork(pmi_df)
@@ -36,8 +42,14 @@ for sentence in sentences[:10]:
         print("Pairwise PMI trajectory:", incremental_trajectory)
         continue  # Skip this sentence if lengths differ
 
+    df['hopfield_delta_harmony'] = [step['delta_harmony'] for step in hopfield_trajectory]
+    df['pmi_delta_harmony'] = [step['delta_harmony'] for step in incremental_trajectory]
     hopfield_traj.extend(hopfield_trajectory)
     pmi_traj.extend(incremental_trajectory)
+
+    # Save the updated dataframe to the output directory
+    output_path = os.path.join(output_dir, sentence)
+    df.to_csv(output_path, index=False)
 
 import pickle
 # Save the trajectories to a pickle file for later analysis

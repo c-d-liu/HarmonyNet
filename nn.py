@@ -253,7 +253,161 @@ class ZScoredHopfieldNetwork:
             return retrieved_words
         else:
             return state
-        
+
+
+class RowNormalizedHopfieldNetwork:
+    """
+    Same z-scored PMI weights as ZScoredHopfieldNetwork, but with the weight
+    matrix *double-centered* (row means AND column means subtracted, grand
+    mean added back -- the standard Gower/MDS centering trick) before use.
+
+    Why: in ZScoredHopfieldNetwork, high-frequency "hub" words (stopwords
+    etc.) rack up thousands of PMI edges and end up with an extremely
+    negative row sum in W. Because get_initial_state() starts every
+    unclamped node at -1.0, that node's activation on the first update is
+    approximately:
+
+        h_i = dot(W[i], state) ~= -row_sum_i + 2 * W[i, seed]
+
+    When row_sum_i is huge and negative (hub words), -row_sum_i swamps the
+    2*W[i, seed] term that's supposed to carry the actual seed-specific
+    signal, so hub nodes fire for *every* seed regardless of relevance --
+    see diagnose_hopfield.py, where ~380 words turn out to be "always on"
+    for 4004/4004 single-word seeds, which is why the retrieved states end
+    up highly correlated across different inputs.
+
+    Double-centering forces every row (and column) of W to sum to ~0 up
+    front, so a word's raw connectivity/degree can no longer bias its
+    activation independent of which words are actually clamped. This uses
+    binary {0, 1} states rather than bipolar {-1, 1} -- see the docstring
+    on `retrieve` for why that pairing matters.
+    """
+
+    def __init__(self, pmi_df):
+        # 1. Setup vocabulary (same convention as ZScoredHopfieldNetwork)
+        pmi_df = pmi_df.copy()
+        pmi_df['z_score'] = (pmi_df['pmi'] - pmi_df['pmi'].mean()) / pmi_df['pmi'].std()
+        unique_words = set(pmi_df['word_x']).union(set(pmi_df['word_y']))
+        self.vocab = sorted(list(unique_words))
+        self.N = len(self.vocab)
+        self.word_to_idx = {w: i for i, w in enumerate(self.vocab)}
+        self.idx_to_word = {i: w for i, w in enumerate(self.vocab)}
+
+        # 2. Build the raw z-scored weight matrix
+        print(f"Building {self.N}x{self.N} raw weight matrix...")
+        W_raw = np.zeros((self.N, self.N))
+        for _, row in pmi_df.iterrows():
+            i = self.word_to_idx[row['word_x']]
+            j = self.word_to_idx[row['word_y']]
+            W_raw[i, j] = row['z_score']
+            W_raw[j, i] = row['z_score']
+        np.fill_diagonal(W_raw, 0.0)
+
+        # 3. Double-center: subtract row mean and column mean, add back the
+        #    grand mean. For a symmetric matrix this is equivalent to
+        #    J @ W_raw @ J where J = I - (1/N) * ones(N,N), which is exactly
+        #    zero row/column sum by construction. We then re-zero the
+        #    diagonal (Hopfield nodes must not self-connect), which nudges
+        #    the row sums off exactly-zero by a tiny amount -- report both
+        #    before/after so the improvement is visible.
+        before_max_abs_row_sum = np.abs(W_raw.sum(axis=1)).max()
+
+        row_mean = W_raw.mean(axis=1, keepdims=True)  # (N, 1)
+        grand_mean = W_raw.mean()
+        W_dc = W_raw - row_mean - row_mean.T + grand_mean
+        np.fill_diagonal(W_dc, 0.0)
+
+        after_max_abs_row_sum = np.abs(W_dc.sum(axis=1)).max()
+        print(f"Row-sum bias before centering: max|row_sum| = {before_max_abs_row_sum:.2f}")
+        print(f"Row-sum bias after centering:  max|row_sum| = {after_max_abs_row_sum:.4f}")
+
+        self.W = W_dc
+
+    def get_initial_state(self, active_words):
+        """Creates a binary state array (0, 1)."""
+        state = np.zeros(self.N)
+        clamped_indices = []
+        for w in active_words:
+            if w in self.word_to_idx:
+                idx = self.word_to_idx[w]
+                state[idx] = 1.0
+                clamped_indices.append(idx)
+        return state, clamped_indices
+
+    def calculate_harmony(self, state):
+        """0.5 * (S^T * W * S), same formula as ZScoredHopfieldNetwork."""
+        return 0.5 * np.dot(state, np.dot(self.W, state))
+
+    def retrieve(self, input_words, max_steps=10, output_words=True, output_harmony=True, track_harmony=True):
+        """
+        Runs binary {0, 1} asynchronous updates with clamped inputs,
+        thresholding strictly at 0.
+
+        Why {0, 1} here rather than {-1, 1}: once W is double-centered so
+        every row sums to ~0, the two encodings actually make the *same*
+        firing decisions in theory -- for any binary state s and its
+        bipolar counterpart b = 2s - 1, dot(W[i], b) = 2*dot(W[i], s) -
+        row_sum_i, and row_sum_i ~= 0, so the sign of the activation
+        (and hence which nodes flip) is the same either way. Given that
+        equivalence, {0, 1} is the more robust and interpretable choice:
+          - It only sums contributions from words that are *actually
+            active*, rather than treating every one of the ~4000
+            not-currently-relevant words as -1 "negative evidence". If
+            the centering is ever imperfect (floating point, or the
+            diagonal re-zeroing above), residual bias is multiplied by
+            however many nodes are "on" (a handful) instead of by N-1
+            (~4000), which is far more forgiving.
+          - calculate_harmony(state) then reduces to
+            0.5 * sum_{i,j active} W[i,j], i.e. "total pairwise
+            association among the retrieved words only" -- the same
+            quantity PMIHarmonyNetwork computes -- rather than also
+            including energy contributions from every inactive pair.
+        """
+        state, clamped_indices = self.get_initial_state(input_words)
+        clamped_set = set(clamped_indices)
+
+        if track_harmony:
+            initial_harmony = self.calculate_harmony(state)
+            print(f"Initial State Harmony: {initial_harmony:.4f}")
+
+        for step in range(max_steps):
+            prev_state = state.copy()
+            indices = np.random.permutation(self.N)
+
+            for i in indices:
+                if i in clamped_set:
+                    continue
+
+                activation = np.dot(self.W[i], state)
+
+                # Binary thresholding strictly at 0
+                if activation > 0:
+                    state[i] = 1.0
+                elif activation < 0:
+                    state[i] = 0.0
+
+            if track_harmony:
+                current_harmony = self.calculate_harmony(state)
+                print(f"Step {step + 1} Harmony: {current_harmony:.4f}")
+
+            if np.array_equal(state, prev_state):
+                print(f"Network converged in {step + 1} iterations.")
+                break
+        else:
+            print(f"Stopped after {max_steps} iterations (no strict convergence).")
+
+        retrieved_words = [
+            self.idx_to_word[i] for i in range(self.N) if state[i] == 1.0
+        ]
+
+        if output_harmony:
+            return self.calculate_harmony(state)
+        elif output_words:
+            return retrieved_words
+        else:
+            return state
+
+
 class PMIHarmonyNetwork:
     def __init__(self, pmi_df):
         """
@@ -406,7 +560,7 @@ class IncrementalHarmonyNetwork:
 if __name__ == "__main__":
     import pandas as pd
     # load the PMI DataFrame
-    pmi_df = pd.read_csv('wordlists/lemmatized_pmi_results_10K.csv', sep='\t', encoding='utf-8')
+    pmi_df = pd.read_csv('wordlists/lemmatized_pmi_results_10K_threshold_3_w_stopwords.csv', sep='\t', encoding='utf-8')
     pmi_df = pmi_df.astype({'word_x': str, 'word_y': str, 'f_xy': int, 'f_x': int, 'f_y': int, 'pmi': float})
     print(f"Mean PMI: {pmi_df['pmi'].mean():.4f}, Std Dev PMI: {pmi_df['pmi'].std():.4f}")
     # 1. Initialize the ZScoredHopfieldNetwork
@@ -416,7 +570,7 @@ if __name__ == "__main__":
     print("Processing input sequence with ZScoredHopfieldNetwork:")
     trajectory = hopfield_net.incremental_retrieve(input_sequence, max_steps_per_word=10, output_harmony=True, output_words=False)    
     for step in trajectory:
-        print(f"Word: {step['word']}, Delta Harmony: {step['delta_harmony']:.4f}, Total Harmony: {step['total_harmony']:.4f}")
+        print(f"Word: {step['word']}, Delta Harmony: {step['delta_harmony']:.4f}, Total Harmony: {step['total_harmony']:.4f}, Active Nodes: {step['active_nodes']}")
 
     # Control: just calculate the total harmony change by feeding the sequence as (a,) (a,b) (a,b,c) (a,b,c,d)
     prev_harmony = 0.0

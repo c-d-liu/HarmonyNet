@@ -125,11 +125,11 @@ if __name__ == "__main__":
     from helper import load_sentences
 
     sentences_df = load_sentences(
-        "eng-simple_wikipedia_2021_10K/eng-simple_wikipedia_2021_10K-sentences.txt"
+        "eng-simple_wikipedia_2021_300K/eng-simple_wikipedia_2021_300K-sentences.txt"
     )
 
     pmi_results, word_frequencies = generate_lemmatized_pmi_fast(
-        sentences_df, min_co_occurrence=3, skip_stopwords=False
+        sentences_df, min_co_occurrence=5, skip_stopwords=False
     )
 
     # Caveat: with min_co_occurrence=0 the head of this ranking is dominated by
@@ -141,7 +141,7 @@ if __name__ == "__main__":
     print(pmi_results.tail(10))
 
     pmi_results.to_csv(
-        "wordlists/lemmatized_pmi_results_10K_threshold_3_w_stopwords.csv",
+        "wordlists/lemmatized_pmi_results_300K_threshold_5_w_stopwords.csv",
         index=False,
         sep="\t",
         encoding="utf-8",
@@ -150,7 +150,7 @@ if __name__ == "__main__":
         list(word_frequencies.items()), columns=["word", "frequency"]
     )
     word_freq_df.to_csv(
-        "wordlists/lemmatized_word_frequencies_10K_threshold_3_w_stopwords.csv",
+        "wordlists/lemmatized_word_frequencies_300K_threshold_5_w_stopwords.csv",
         index=False,
         sep="\t",
         encoding="utf-8",
